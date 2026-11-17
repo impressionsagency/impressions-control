@@ -2,13 +2,13 @@
 /**
  * Plugin Name: Impressions Control
  * Description: Agent-API control center for Impressions-managed sites. Authenticated REST endpoints for state, settings, pages, media, galleries, Elementor saves, cache clearing, blog posts, SEO fields, and the v0.4 change-history / revert safety net. Install per client.
- * Version: 0.9.2
+ * Version: 0.9.3
  * Author: Impressions Agency
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('IMP_VERSION', '0.9.2');
+define('IMP_VERSION', '0.9.3');
 define('IMP_NS',      'impressions/v1');
 define('IMP_KEY_OPT', 'imp_api_key');
 
@@ -34,6 +34,48 @@ require_once __DIR__ . '/includes/class-imp-content.php';
 /* v0.9 — design transfer: kit, site CSS/JS files, Theme Builder templates,
    Elementor pages, media/font/video import, read-back. */
 require_once __DIR__ . '/includes/class-imp-design.php';
+
+/* ============================================================
+   SAFE THEME FOR HUB WRITES (v0.9.3)
+   ------------------------------------------------------------
+   Some sites (old heavy themes) run out of memory in the theme's save
+   hooks when the Hub creates a post. While a Hub WRITE request is being
+   handled, load a plain theme instead of the site's real one. Public
+   pages, wp-admin and Hub reads (GET) keep the real theme.
+   Setting (default empty = off): constant IMP_SAFE_THEME in wp-config.php,
+   else the option imp_safe_theme (settings screen or POST /safe-theme).
+   Registered at plugin load, before WordPress sets up the theme.
+   To undo: clear the setting.
+   ============================================================ */
+define('IMP_SAFE_THEME_OPT', 'imp_safe_theme');
+
+function imp_safe_theme_slug() {
+    $slug = defined('IMP_SAFE_THEME') ? IMP_SAFE_THEME : get_option(IMP_SAFE_THEME_OPT, '');
+    return is_string($slug) ? sanitize_title($slug) : '';
+}
+
+function imp_is_hub_write_request() {
+    $method = isset($_SERVER['REQUEST_METHOD']) ? strtoupper($_SERVER['REQUEST_METHOD']) : 'GET';
+    if (!in_array($method, ['POST', 'PUT', 'PATCH'], true)) return false;
+    $uri = isset($_SERVER['REQUEST_URI']) ? rawurldecode($_SERVER['REQUEST_URI']) : '';
+    return false !== strpos($uri, '/wp-json/' . IMP_NS . '/')
+        || false !== strpos($uri, 'rest_route=/' . IMP_NS . '/');
+}
+
+(function () {
+    if (!imp_is_hub_write_request()) return;
+    $safe = imp_safe_theme_slug();
+    if ($safe === '') return; // off
+    $root = function_exists('get_theme_root') ? get_theme_root() : WP_CONTENT_DIR . '/themes';
+    if (!is_dir($root . '/' . $safe)) {
+        error_log('Impressions Control: safe theme "' . $safe . '" is not installed, not switching');
+        return;
+    }
+    $use = function () use ($safe) { return $safe; };
+    add_filter('template',   $use);
+    add_filter('stylesheet', $use);
+    error_log('Impressions Control: safe theme used for a Hub write');
+})();
 
 /* ============================================================
    SELF-UPDATE (v0.5.5) — Part D of PLUGIN-V05-HUB-CONNECT-SPEC.md
@@ -261,6 +303,40 @@ add_action('rest_api_init', function () {
                 'plugin_version'         => IMP_VERSION,
             ];
         },
+    ]);
+
+    /* ----------------------------------------------------------
+       GET/POST /safe-theme  (v0.9.3) — read / set the safe-theme slug.
+       POST {"theme":"twentytwentyfour"} turns it on; {"theme":""} turns it off.
+       ---------------------------------------------------------- */
+    register_rest_route(IMP_NS, '/safe-theme', [
+        [
+            'methods'             => 'GET',
+            'permission_callback' => $auth,
+            'callback'            => function () {
+                $slug = imp_safe_theme_slug();
+                return [
+                    'theme'        => $slug,
+                    'enabled'      => $slug !== '',
+                    'installed'    => $slug !== '' && is_dir(get_theme_root() . '/' . $slug),
+                    'from_constant'=> defined('IMP_SAFE_THEME'),
+                ];
+            },
+        ],
+        [
+            'methods'             => 'POST',
+            'permission_callback' => $auth,
+            'callback'            => function (WP_REST_Request $req) {
+                if (defined('IMP_SAFE_THEME')) return new WP_Error('locked','Set by IMP_SAFE_THEME in wp-config.php',['status'=>409]);
+                $body = $req->get_json_params();
+                $slug = is_array($body) && isset($body['theme']) && is_string($body['theme']) ? sanitize_title($body['theme']) : null;
+                if ($slug === null) return new WP_Error('bad_theme','theme (string) required; empty turns it off',['status'=>400]);
+                if ($slug !== '' && !is_dir(get_theme_root() . '/' . $slug))
+                    return new WP_Error('not_installed','Theme "'.$slug.'" is not installed on this site',['status'=>409]);
+                update_option(IMP_SAFE_THEME_OPT, $slug, false);
+                return ['ok'=>true,'theme'=>$slug,'enabled'=>$slug !== ''];
+            },
+        ],
     ]);
 
     /* ----------------------------------------------------------
@@ -696,6 +772,16 @@ add_action('admin_menu', function () {
             }
         }
 
+        if (isset($_POST['imp_safe_save']) && check_admin_referer('imp_safe_save') && !defined('IMP_SAFE_THEME')) {
+            $s = sanitize_title($_POST['imp_safe_theme'] ?? '');
+            if ($s !== '' && !is_dir(get_theme_root() . '/' . $s)) {
+                echo '<div class="notice notice-error"><p>Theme "'.esc_html($s).'" is not installed.</p></div>';
+            } else {
+                update_option(IMP_SAFE_THEME_OPT, $s, false);
+                echo '<div class="notice notice-success"><p>Safe theme '.($s === '' ? 'turned off' : 'set to "'.esc_html($s).'"').'.</p></div>';
+            }
+        }
+
         $key         = get_option(IMP_KEY_OPT);
         $url         = home_url();
         $slug        = get_option(IMP_SLUG_OPT) ?: imp_default_slug();
@@ -721,10 +807,20 @@ add_action('admin_menu', function () {
         echo '<p style="margin-top:6px;color:#666">Hub: <code>'.esc_html(IMP_HUB_URL).'</code></p></form>';
 
         echo '<hr style="margin:24px 0">';
+        echo '<h2>Safe theme for Hub writes</h2>';
+        echo '<p>While the Hub writes to this site, load this plain theme instead of the real one (fixes memory-exhausted saves on old themes). Public pages and wp-admin are unaffected. Leave empty to turn off.</p>';
+        echo '<form method="post">'.wp_nonce_field('imp_safe_save','_wpnonce',true,false);
+        echo '<p><input type="text" name="imp_safe_theme" value="'.esc_attr(imp_safe_theme_slug()).'" placeholder="twentytwentyfour" style="font-family:monospace"'.(defined('IMP_SAFE_THEME') ? ' readonly' : '').'> ';
+        echo '<button class="button" name="imp_safe_save" value="1"'.(defined('IMP_SAFE_THEME') ? ' disabled' : '').'>Save</button></p>';
+        if (defined('IMP_SAFE_THEME')) echo '<p style="color:#666">Set by <code>IMP_SAFE_THEME</code> in wp-config.php.</p>';
+        echo '</form>';
+
+        echo '<hr style="margin:24px 0">';
         echo '<h2>Endpoints (v0.9)</h2>';
         echo '<table class="widefat" style="max-width:760px"><thead><tr><th>Method</th><th>Path</th><th>What it does</th></tr></thead><tbody>';
         $eps = [
             ['GET',  '/state',          'Read full site state (theme, Elementor, pages, templates, forms)'],
+            ['GET/POST', '/safe-theme', 'Read / set the safe theme loaded during Hub writes; empty = off (NEW v0.9.3)'],
             ['GET',  '/site-settings',  'Dump active Elementor kit settings'],
             ['POST', '/site-settings',  'Apply settings JSON to kit + regenerate CSS'],
             ['POST', '/apply-baseline', 'Apply bundled baseline.json to kit'],
