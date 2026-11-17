@@ -2,7 +2,7 @@
 
 WordPress plugin: the server-to-server control channel between the Impressions hub/CLI and each client site. One copy per client site.
 
-**Current release: v0.9.6** (2026-11-17). This repo (`main` + GitHub Releases) is the only source of truth for the plugin. Check the latest release before starting any plugin work. Update this line at every release.
+**Current release: v0.9.6** (2026-11-17). Next: v0.9.7 (SEO write creates the AIOSEO record when a post has none), pending release. This repo (`main` + GitHub Releases) is the only source of truth for the plugin. Check the latest release before starting any plugin work. Update this line at every release.
 
 ## Releasing
 1. Bump `Version:` in `impressions-control.php` and `IMP_VERSION` (both).

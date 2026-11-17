@@ -738,13 +738,21 @@ class IMP_Content {
 		];
 	}
 
-	/** Load the AIOSEO model for a post, trying each known namespace. Never throws. */
-	private static function get_aioseo_model( $post_id ) {
+	/** Load the AIOSEO model for a post, trying each known namespace. Never throws.
+	 *  $allow_new (v0.9.7, SEO writes only): AIOSEO's getPost() returns a fresh,
+	 *  unsaved model (post_id set, no id yet) when the post has no AIOSEO row,
+	 *  e.g. a post created while AIOSEO was not loaded. Accept it so the caller's
+	 *  save() creates the row. Reads keep requiring an existing row. */
+	private static function get_aioseo_model( $post_id, $allow_new = false ) {
 		foreach ( self::aioseo_model_classes() as $class ) {
 			if ( ! class_exists( $class ) || ! method_exists( $class, 'getPost' ) ) { continue; }
 			try {
 				$p = $class::getPost( $post_id );
 				if ( $p && isset( $p->id ) ) { return $p; }
+				if ( $allow_new && is_object( $p ) ) {
+					if ( empty( $p->post_id ) ) { $p->post_id = $post_id; }
+					if ( (int) $p->post_id === (int) $post_id ) { return $p; }
+				}
 			} catch ( \Throwable $e ) {
 				continue; // try the next namespace rather than fatal
 			}
@@ -905,7 +913,7 @@ class IMP_Content {
 				return new WP_Error( 'no_aioseo', 'AIOSEO is not active on this site.', [ 'status' => 409 ] );
 			}
 
-			$p = self::get_aioseo_model( $post_id );
+			$p = self::get_aioseo_model( $post_id, true );
 			if ( ! $p ) {
 				return new WP_Error( 'aioseo_post_failed', 'Could not load/create the AIOSEO record for this post (checked known model namespaces: ' . implode( ', ', self::aioseo_model_classes() ) . ').', [ 'status' => 500 ] );
 			}

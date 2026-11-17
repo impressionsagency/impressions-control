@@ -2,13 +2,13 @@
 /**
  * Plugin Name: Impressions Control
  * Description: Agent-API control center for Impressions-managed sites. Authenticated REST endpoints for state, settings, pages, media, galleries, Elementor saves, cache clearing, blog posts, SEO fields, and the v0.4 change-history / revert safety net. Install per client.
- * Version: 0.9.6
+ * Version: 0.9.7
  * Author: Impressions Agency
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('IMP_VERSION', '0.9.6');
+define('IMP_VERSION', '0.9.7');
 define('IMP_NS',      'impressions/v1');
 define('IMP_KEY_OPT', 'imp_api_key');
 
