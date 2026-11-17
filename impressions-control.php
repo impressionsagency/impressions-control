@@ -2,13 +2,13 @@
 /**
  * Plugin Name: Impressions Control
  * Description: Agent-API control center for Impressions-managed sites. Authenticated REST endpoints for state, settings, pages, media, galleries, Elementor saves, cache clearing, blog posts, SEO fields, and the v0.4 change-history / revert safety net. Install per client.
- * Version: 0.9.4
+ * Version: 0.9.5
  * Author: Impressions Agency
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('IMP_VERSION', '0.9.4');
+define('IMP_VERSION', '0.9.5');
 define('IMP_NS',      'impressions/v1');
 define('IMP_KEY_OPT', 'imp_api_key');
 
@@ -82,6 +82,51 @@ function imp_is_hub_write_request() {
    handler below can still record what ran out of memory, even when the host
    gives us no error log. Read it back with GET /safe-theme (last_fatal). */
 if (imp_is_hub_write_request()) $GLOBALS['imp_mem_reserve'] = str_repeat('x', 1048576);
+
+/* v0.9.5 — optional second layer: during Hub writes, load ONLY an allow-list
+   of plugins (this plugin, plus the SEO plugin on the /seo route). Normal
+   plugins load too late to change the active plugin list, so this writes a
+   small must-use plugin when the setting is on and deletes it when off (or
+   when this plugin is deactivated). Off by default. */
+define('IMP_ALLOWLIST_OPT', 'imp_plugin_allowlist');
+define('IMP_MU_FILE', 'impressions-hub-allowlist.php');
+
+function imp_mu_path() { return trailingslashit(WPMU_PLUGIN_DIR) . IMP_MU_FILE; }
+
+function imp_mu_source() {
+    $dir = dirname(plugin_basename(__FILE__)) . '/';
+    return "<?php\n"
+    . "// Impressions Control: Hub-write plugin allow-list. Auto-generated; removed when the setting is turned off.\n"
+    . "if ( ! defined( 'ABSPATH' ) ) { exit; }\n"
+    . "( function () {\n"
+    . "\t\$m = isset( \$_SERVER['REQUEST_METHOD'] ) ? strtoupper( \$_SERVER['REQUEST_METHOD'] ) : 'GET';\n"
+    . "\tif ( ! in_array( \$m, array( 'POST', 'PUT', 'PATCH' ), true ) ) { return; }\n"
+    . "\t\$uri = isset( \$_SERVER['REQUEST_URI'] ) ? rawurldecode( \$_SERVER['REQUEST_URI'] ) : '';\n"
+    . "\tif ( false === strpos( \$uri, '/wp-json/" . IMP_NS . "/' ) && false === strpos( \$uri, 'rest_route=/" . IMP_NS . "/' ) ) { return; }\n"
+    . "\t\$seo = false !== strpos( \$uri, '/" . IMP_NS . "/seo' );\n"
+    . "\t\$GLOBALS['imp_plugins_limited'] = true;\n"
+    . "\tadd_filter( 'option_active_plugins', function ( \$plugins ) use ( \$seo ) {\n"
+    . "\t\treturn array_values( array_filter( (array) \$plugins, function ( \$p ) use ( \$seo ) {\n"
+    . "\t\t\tif ( 0 === strpos( \$p, '" . $dir . "' ) ) { return true; }\n"
+    . "\t\t\treturn \$seo && ( 0 === strpos( \$p, 'all-in-one-seo' ) || 0 === strpos( \$p, 'wordpress-seo' ) || 0 === strpos( \$p, 'seo-by-rank-math' ) );\n"
+    . "\t\t} ) );\n"
+    . "\t} );\n"
+    . "\terror_log( 'Impressions Control: plugin allow-list used for a Hub write' );\n"
+    . "} )();\n";
+}
+
+function imp_apply_allowlist($on) {
+    $path = imp_mu_path();
+    if ($on) {
+        if (!is_dir(WPMU_PLUGIN_DIR) && !wp_mkdir_p(WPMU_PLUGIN_DIR)) return new WP_Error('mu_dir', 'Cannot create the mu-plugins folder');
+        if (false === file_put_contents($path, imp_mu_source())) return new WP_Error('mu_write', 'Cannot write ' . $path);
+    } elseif (file_exists($path)) {
+        @unlink($path);
+    }
+    update_option(IMP_ALLOWLIST_OPT, $on ? 1 : 0, false);
+    return true;
+}
+register_deactivation_hook(__FILE__, function () { imp_apply_allowlist(false); });
 
 /* ============================================================
    SELF-UPDATE (v0.5.5) — Part D of PLUGIN-V05-HUB-CONNECT-SPEC.md
@@ -159,6 +204,7 @@ add_action('shutdown', function () {
         'time'              => gmdate('c'),
         'uri'               => substr(rawurldecode($_SERVER['REQUEST_URI']), 0, 200),
         'safe_theme_active' => isset($GLOBALS['imp_safe_theme_active']) ? $GLOBALS['imp_safe_theme_active'] : '',
+        'plugins_limited'   => !empty($GLOBALS['imp_plugins_limited']),
         'message'           => substr($err['message'], 0, 500),
         'file'              => $err['file'],
         'line'              => $err['line'],
@@ -317,6 +363,7 @@ add_action('rest_api_init', function () {
                 'gravity_forms'          => $forms,
                 'plugin_version'         => IMP_VERSION,
                 'safe_theme'             => imp_safe_theme_slug(),
+                'plugin_allowlist'       => file_exists(imp_mu_path()),
                 'last_fatal'             => get_option('imp_last_fatal', null),
             ];
         },
@@ -800,6 +847,12 @@ add_action('admin_menu', function () {
             }
         }
 
+        if (isset($_POST['imp_allow_save']) && check_admin_referer('imp_allow_save')) {
+            $r = imp_apply_allowlist(!empty($_POST['imp_allow_on']));
+            if (is_wp_error($r)) echo '<div class="notice notice-error"><p>'.esc_html($r->get_error_message()).'</p></div>';
+            else echo '<div class="notice notice-success"><p>Plugin allow-list '.(!empty($_POST['imp_allow_on']) ? 'turned on' : 'turned off').'.</p></div>';
+        }
+
         $key         = get_option(IMP_KEY_OPT);
         $url         = home_url();
         $slug        = get_option(IMP_SLUG_OPT) ?: imp_default_slug();
@@ -832,6 +885,13 @@ add_action('admin_menu', function () {
         echo '<button class="button" name="imp_safe_save" value="1"'.(defined('IMP_SAFE_THEME') ? ' disabled' : '').'>Save</button></p>';
         if (defined('IMP_SAFE_THEME')) echo '<p style="color:#666">Set by <code>IMP_SAFE_THEME</code> in wp-config.php.</p>';
         echo '</form>';
+
+        echo '<hr style="margin:24px 0">';
+        echo '<h2>Plugin allow-list for Hub writes</h2>';
+        echo '<p>Only use if the safe theme did not fix failing Hub saves. While the Hub writes, load only Impressions Control (plus the SEO plugin on the SEO route). Other plugins are not loaded for those requests only. Installs/removes a must-use file automatically.</p>';
+        echo '<form method="post">'.wp_nonce_field('imp_allow_save','_wpnonce',true,false);
+        echo '<p><label><input type="checkbox" name="imp_allow_on" value="1"'.(file_exists(imp_mu_path()) ? ' checked' : '').'> Limit plugins during Hub writes</label> ';
+        echo '<button class="button" name="imp_allow_save" value="1">Save</button></p></form>';
 
         echo '<hr style="margin:24px 0">';
         echo '<h2>Endpoints (v0.9)</h2>';
