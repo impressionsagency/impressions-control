@@ -2,13 +2,13 @@
 /**
  * Plugin Name: Impressions Control
  * Description: Agent-API control center for Impressions-managed sites. Authenticated REST endpoints for state, settings, pages, media, galleries, Elementor saves, cache clearing, blog posts, SEO fields, and the v0.4 change-history / revert safety net. Install per client.
- * Version: 0.9.3
+ * Version: 0.9.4
  * Author: Impressions Agency
  */
 
 if (!defined('ABSPATH')) exit;
 
-define('IMP_VERSION', '0.9.3');
+define('IMP_VERSION', '0.9.4');
 define('IMP_NS',      'impressions/v1');
 define('IMP_KEY_OPT', 'imp_api_key');
 
@@ -74,8 +74,14 @@ function imp_is_hub_write_request() {
     $use = function () use ($safe) { return $safe; };
     add_filter('template',   $use);
     add_filter('stylesheet', $use);
+    $GLOBALS['imp_safe_theme_active'] = $safe;
     error_log('Impressions Control: safe theme used for a Hub write');
 })();
+
+/* v0.9.4 — keep a little memory in reserve during Hub writes so the fatal
+   handler below can still record what ran out of memory, even when the host
+   gives us no error log. Read it back with GET /safe-theme (last_fatal). */
+if (imp_is_hub_write_request()) $GLOBALS['imp_mem_reserve'] = str_repeat('x', 1048576);
 
 /* ============================================================
    SELF-UPDATE (v0.5.5) — Part D of PLUGIN-V05-HUB-CONNECT-SPEC.md
@@ -148,6 +154,15 @@ add_action('shutdown', function () {
     if (empty($_SERVER['REQUEST_URI']) || strpos($_SERVER['REQUEST_URI'], IMP_NS) === false) {
         return; // not one of our API requests — leave the site's normal behavior alone
     }
+    unset($GLOBALS['imp_mem_reserve']); // free the reserve so we can record the fatal
+    update_option('imp_last_fatal', [
+        'time'              => gmdate('c'),
+        'uri'               => substr(rawurldecode($_SERVER['REQUEST_URI']), 0, 200),
+        'safe_theme_active' => isset($GLOBALS['imp_safe_theme_active']) ? $GLOBALS['imp_safe_theme_active'] : '',
+        'message'           => substr($err['message'], 0, 500),
+        'file'              => $err['file'],
+        'line'              => $err['line'],
+    ], false);
     if (!headers_sent()) {
         http_response_code(500);
         header('Content-Type: application/json');
@@ -301,6 +316,8 @@ add_action('rest_api_init', function () {
                 'theme_builder_templates'=> $templates,
                 'gravity_forms'          => $forms,
                 'plugin_version'         => IMP_VERSION,
+                'safe_theme'             => imp_safe_theme_slug(),
+                'last_fatal'             => get_option('imp_last_fatal', null),
             ];
         },
     ]);
@@ -320,6 +337,7 @@ add_action('rest_api_init', function () {
                     'enabled'      => $slug !== '',
                     'installed'    => $slug !== '' && is_dir(get_theme_root() . '/' . $slug),
                     'from_constant'=> defined('IMP_SAFE_THEME'),
+                    'last_fatal'   => get_option('imp_last_fatal', null),
                 ];
             },
         ],
